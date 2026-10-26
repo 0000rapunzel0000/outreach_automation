@@ -1,0 +1,272 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  APPLICANT
+  EMPLOYEE
+  REVIEWER
+  SUPER_ADMIN
+}
+
+enum PersonStatus {
+  DRAFT
+  PENDING_REVIEW
+  ACTIVE
+  REJECTED
+  SUSPENDED
+  OFFBOARDED
+}
+
+// Our normalised view of a Unipile account.
+enum LinkStatus {
+  CONNECTED
+  CONNECTING
+  NEEDS_RECONNECT // CREDENTIALS / STOPPED, or ERROR past grace
+  TRANSIENT_ERROR // ERROR within grace window
+  DELETED
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String?
+  role         Role      @default(APPLICANT)
+  whatsappE164 String? // admins only: where escalations go
+  createdAt    DateTime  @default(now())
+  person       Person?
+  sessions     Session[]
+}
+
+model Session {
+  id        String   @id // sha256 of the cookie token
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Person {
+  id                   String           @id @default(cuid())
+  userId               String           @unique
+  user                 User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status               PersonStatus     @default(DRAFT)
+  onboardingStep       Int              @default(0) // 0 account,1 tos,2 details,3 linkedin,4 submitted
+  fullName             String?
+  mobileE164           String?
+  whatsappE164         String?
+  whatsappVerifiedAt   DateTime?
+  whatsappOnWa         Boolean? // cached sock.onWhatsApp result
+  whatsappOnWaCheckedAt DateTime?
+  addressLine1         String?
+  addressLine2         String?
+  city                 String?
+  state                String?
+  pincode              String?
+  panEnc               String?
+  bankAccountEnc       String?
+  ifscEnc              String?
+  upiIdEnc             String?
+  paymentMethod        String? // "bank" | "upi"
+  linkedinError        String? // e.g. "duplicate_linkedin"
+  submittedAt          DateTime?
+  reviewedById         String?
+  reviewedAt           DateTime?
+  rejectionReason      String?
+  activatedAt          DateTime?
+  suspendedAt          DateTime?
+  offboardedAt         DateTime?
+  purgeAfter           DateTime?
+  linkedin             LinkedInAccount?
+  tosAcceptances       TosAcceptance[]
+  incidents            Incident[]
+  notifications        Notification[]
+  reconnectTokens      ReconnectToken[]
+
+  @@index([status])
+}
+
+model LinkedInAccount {
+  id               String            @id @default(cuid())
+  personId         String            @unique
+  person           Person            @relation(fields: [personId], references: [id], onDelete: Cascade)
+  unipileAccountId String            @unique
+  providerUserId   String?           @unique
+  displayName      String?
+  profileUrl       String?
+  status           LinkStatus        @default(CONNECTING)
+  lastRawStatus    String?
+  lastStatusAt     DateTime?
+  connectedAt      DateTime?
+  events           ConnectionEvent[]
+
+  @@index([status])
+}
+
+model ConnectionEvent {
+  id         String          @id @default(cuid())
+  accountId  String
+  account    LinkedInAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  rawStatus  String
+  normalized LinkStatus
+  source     String // "webhook" | "reconciler" | "notify_url" | "manual"
+  payload    Json?
+  receivedAt DateTime        @default(now())
+
+  @@index([accountId, receivedAt])
+}
+
+model Incident {
+  id          String    @id @default(cuid())
+  personId    String
+  person      Person    @relation(fields: [personId], references: [id], onDelete: Cascade)
+  startedAt   DateTime
+  resolvedAt  DateTime?
+  cause       String
+  nudgeCount  Int       @default(0)
+  escalatedAt DateTime?
+  lastNudgeAt DateTime?
+
+  @@index([personId, startedAt])
+  @@index([resolvedAt])
+}
+
+model Notification {
+  id                String    @id @default(cuid())
+  personId          String?
+  person            Person?   @relation(fields: [personId], references: [id], onDelete: Cascade)
+  incidentId        String?
+  channel           String // "whatsapp" | "email"
+  templateKey       String
+  toAddress         String
+  body              String
+  status            String // "queued" | "sent" | "failed" | "deferred_quiet_hours" | "skipped"
+  attempts          Int       @default(0)
+  providerMessageId String?
+  error             String?
+  createdAt         DateTime  @default(now())
+  sentAt            DateTime?
+
+  @@index([personId, createdAt])
+  @@index([channel, status, sentAt])
+}
+
+model TosVersion {
+  id            String          @id @default(cuid())
+  version       Int             @unique
+  contentMd     String
+  contentHash   String
+  publishedAt   DateTime?
+  publishedById String?
+  isCurrent     Boolean         @default(false)
+  acceptances   TosAcceptance[]
+}
+
+model TosAcceptance {
+  id           String     @id @default(cuid())
+  personId     String
+  person       Person     @relation(fields: [personId], references: [id], onDelete: Cascade)
+  tosVersionId String
+  tosVersion   TosVersion @relation(fields: [tosVersionId], references: [id])
+  acceptedAt   DateTime   @default(now())
+  ip           String
+  userAgent    String
+
+  @@unique([personId, tosVersionId])
+}
+
+model OtpCode {
+  id         String    @id @default(cuid())
+  phoneE164  String
+  purpose    String
+  codeHash   String
+  expiresAt  DateTime
+  attempts   Int       @default(0)
+  consumedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([phoneE164, createdAt])
+}
+
+model ReconnectToken {
+  id         String    @id
+  personId   String
+  person     Person    @relation(fields: [personId], references: [id], onDelete: Cascade)
+  incidentId String?
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  targetType String
+  targetId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([targetType, targetId])
+  @@index([createdAt])
+}
+
+model WaAuthState {
+  key       String   @id
+  valueEnc  String
+  updatedAt DateTime @updatedAt
+}
+
+model Setting {
+  key   String @id
+  value Json
+}
+
+// Dashboard flags needing an admin's eye (external deletes, duplicate LinkedIn).
+model AdminFlag {
+  id         String    @id @default(cuid())
+  kind       String
+  personId   String?
+  message    String
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+  resolvedBy String?
+
+  @@index([resolvedAt])
+}
+
+// Web -> worker RPC (e.g. onWhatsApp checks). The worker polls pending rows.
+model WorkerCommand {
+  id        String    @id @default(cuid())
+  kind      String
+  payload   Json
+  status    String    @default("pending") // pending | done | error
+  result    Json?
+  createdAt DateTime  @default(now())
+  doneAt    DateTime?
+
+  @@index([status, createdAt])
+}
+
+model RateLimit {
+  key         String   @id
+  windowStart DateTime
+  count       Int
+}
+
+// Backing store for UNIPILE_FAKE=true. Shared by web and worker.
+model FakeUnipileAccount {
+  id             String   @id
+  name           String
+  providerUserId String
+  publicId       String
+  status         String
+  createdAt      DateTime @default(now())
+}
